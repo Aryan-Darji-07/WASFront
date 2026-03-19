@@ -5,6 +5,10 @@ import api from '../services/api';
 
 const WhatsAppContext = createContext(null);
 
+// On Render, frontend and backend are separate services.
+// We connect the socket directly to the backend URL.
+const BACKEND_URL =  "https://whatsapp-scheduler-t9a2.onrender.com".replace('/api', '')
+
 export function WhatsAppProvider({ children }) {
   const { user } = useAuth();
   const [waStatus, setWaStatus] = useState('initializing');
@@ -22,17 +26,27 @@ export function WhatsAppProvider({ children }) {
       setWaStatus('disconnected');
     });
 
-    const socket = io('https://whatsapp-scheduler-t9a2.onrender.com/', {
+    const socket = io(BACKEND_URL, {
       auth: { token: localStorage.getItem('token') },
       transports: ['websocket', 'polling'],
+      reconnection: true,
+      reconnectionAttempts: Infinity,
+      reconnectionDelay: 1000,
+      reconnectionDelayMax: 5000,
+      timeout: 20000,
     });
 
     socketRef.current = socket;
 
     socket.on('connect', () => {
-  console.log('[Socket] Connected');
-  socket.emit('join', { userId: user.id }); // tells server which user's room to join
-});
+      console.log('[Socket] Connected');
+      socket.emit('join', { userId: user.id });
+      // Re-fetch status on reconnect in case we missed events
+      api.get('/whatsapp/status').then(res => {
+        setWaStatus(res.data.status);
+        setQrCode(res.data.qr || null);
+      }).catch(() => {});
+    });
 
     socket.on('wa:status', ({ status, qr }) => {
       setWaStatus(status);
@@ -54,11 +68,26 @@ export function WhatsAppProvider({ children }) {
       setQrCode(null);
     });
 
-    socket.on('disconnect', () => {
-      console.log('[Socket] Disconnected');
+    socket.on('disconnect', (reason) => {
+      console.log('[Socket] Disconnected:', reason);
     });
 
+    socket.on('connect_error', (err) => {
+      console.warn('[Socket] Connect error:', err.message);
+    });
+
+    // Poll status every 10s as fallback when socket is unreliable
+    const pollInterval = setInterval(() => {
+      if (!socket.connected) {
+        api.get('/whatsapp/status').then(res => {
+          setWaStatus(res.data.status);
+          setQrCode(res.data.qr || null);
+        }).catch(() => {});
+      }
+    }, 10000);
+
     return () => {
+      clearInterval(pollInterval);
       socket.disconnect();
     };
   }, [user]);
